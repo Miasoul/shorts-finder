@@ -1,8 +1,0 @@
-Flask
-flask-cors
-numpy
-opencv-python
-tensorflow
-pillow
-requests
-scikit-learn
