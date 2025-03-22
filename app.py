@@ -102,6 +102,10 @@ def find_similar_video_from_saved_features(capture_image, save_folder):
 
 
 # API 엔드포인트
+@@app.route('/')
+def home():
+    return "Check"
+
 @app.route('/find_similar_video', methods=['POST'])
 def find_similar_video():
     # 요청에서 이미지 URL을 가져옵니다.
@@ -152,4 +156,4 @@ def find_similar_video():
 # API 서버 실행
 if __name__ == '__main__':
     save_folder = "./data"  # 미리 저장된 특징 벡터 파일 폴더
-    app.run(debug=True, port = 8080)
+    app.run(debug=True, port = 10000)
