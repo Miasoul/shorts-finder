@@ -156,4 +156,4 @@ def find_similar_video():
 # API 서버 실행
 if __name__ == '__main__':
     save_folder = "./data"  # 미리 저장된 특징 벡터 파일 폴더
-    app.run(debug=True, port = 10000)
+    app.run(host="0.0.0.0", port=44324, debug=True)
