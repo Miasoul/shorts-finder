@@ -102,7 +102,7 @@ def find_similar_video_from_saved_features(capture_image, save_folder):
 
 
 # API 엔드포인트
-@@app.route('/')
+@app.route('/')
 def home():
     return "Check"
 
