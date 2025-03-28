@@ -4,18 +4,14 @@ import pickle
 import cv2
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import requests
-from io import BytesIO
+import base64
 from PIL import Image
 from tensorflow.keras.applications import VGG16
 from tensorflow.keras.applications.vgg16 import preprocess_input
 from tensorflow.keras.models import Model
 import re
-import webbrowser
 from flask_cors import CORS
-import base64
-# Flask 앱 초기화
-from PIL import Image
+from pyngrok import ngrok  # ngrok 라이브러리 추가
 
 def crop_img(img_path):
     """
@@ -46,11 +42,8 @@ def crop_img(img_path):
         print(f"이미지 처리 중 오류 발생: {e}")
     return img_path
 
-    
-
 app = Flask(__name__)
 CORS(app)  # CORS 허용
-
 
 # CNN 모델 준비 (VGG16 모델 사용, FC 층 제거)
 base_model = VGG16(weights='imagenet')
@@ -100,7 +93,6 @@ def find_similar_video_from_saved_features(capture_image, save_folder):
 
     return best_video, best_match_score, best_frame_time
 
-
 # API 엔드포인트
 @app.route('/')
 def home():
@@ -123,12 +115,9 @@ def find_similar_video():
         return jsonify({'error': '이미지 URL이 제공되지 않았습니다.'}), 400
 
     try:
-        # 이미지 다운로드
-        
-
         # 이미지 데이터 처리
-        img_data = crop_img('C:/Users/wkd18/Desktop/d/dest/py/output_image.jpg')
-        best_video, best_match_score, best_frame_time = find_similar_video_from_saved_features('C:/Users/wkd18/Desktop/d/dest/py/output_image.jpg', save_folder)
+        img_data = crop_img('output_image.jpg')
+        best_video, best_match_score, best_frame_time = find_similar_video_from_saved_features('output_image.jpg', save_folder)
 
         if best_video is None or best_frame_time is None:
             return jsonify({'message': '유사한 영상을 찾을 수 없습니다.'}), 404
@@ -152,8 +141,14 @@ def find_similar_video():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
 # API 서버 실행
 if __name__ == '__main__':
     save_folder = "./data"  # 미리 저장된 특징 벡터 파일 폴더
-    app.run(host="0.0.0.0", port=44324, debug=True)
+    
+    # ngrok 터널 생성
+    port = 44324
+    public_url = ngrok.connect(port)
+    print(f"ngrok 터널 생성: {public_url}")
+
+    # Flask 서버 실행
+    app.run(host="0.0.0.0", port=port, debug=True)
