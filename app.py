@@ -127,8 +127,8 @@ def find_similar_video():
         
 
         # 이미지 데이터 처리
-        img_data = crop_img('C:/Users/wkd18/Desktop/d/dest/py/output_image.jpg')
-        best_video, best_match_score, best_frame_time = find_similar_video_from_saved_features('C:/Users/wkd18/Desktop/d/dest/py/output_image.jpg', save_folder)
+        img_data = crop_img('./output_image.jpg')
+        best_video, best_match_score, best_frame_time = find_similar_video_from_saved_features('./output_image.jpg', save_folder)
 
         if best_video is None or best_frame_time is None:
             return jsonify({'message': '유사한 영상을 찾을 수 없습니다.'}), 404
