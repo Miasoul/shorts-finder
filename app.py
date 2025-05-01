@@ -16,6 +16,7 @@ import base64
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from playwright.sync_api import sync_playwright  # 추가: Playwright 임포트
+import time  # 추가: 요청 간 딜레이를 위한 time 모듈
 
 app = Flask(__name__)
 CORS(app)
@@ -82,7 +83,7 @@ def login():
     else:
         return jsonify({"error": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
 
-# 📌 [새로운 기능] - 도서 검색 API
+# 📌 [새로운 기능] - 도서 검색 API (bookKey로 검색)
 @app.route('/search_book', methods=['POST'])
 def search_book():
     data = request.json
@@ -113,6 +114,75 @@ def fetch_book_info(book_key):
         browser.close()
 
         return {"title": title.strip(), "status": status.strip(), "img": img}
+
+# 📌 [새로운 기능] - 도서명으로 검색하는 API
+@app.route('/search_book_name', methods=['POST'])
+def search_book_name_api():
+    data = request.json
+    book_name = data.get("book_name")
+    
+    if not book_name:
+        return jsonify({"error": "도서명이 제공되지 않았습니다."}), 400
+    
+    try:
+        results = search_book_name(book_name)
+        return jsonify(results), 200
+    except Exception as e:
+        return jsonify({"error": f"도서명 검색 중 오류 발생: {str(e)}"}), 500
+
+def search_book_name(book_name):
+    """도서명으로 검색하는 함수"""
+    # Step 1: 검색 API에 요청
+    search_url = "https://read365.edunet.net/alpasq/api/search"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "searchKeyword": book_name,
+        "neisCode": ["J100000477"],
+        "provCode": "J10",
+        "schoolName": "관양고등학교",
+        "coverYn": "N"
+    }
+
+    response = requests.post(search_url, json=payload, headers=headers)
+
+    if not response.ok:
+        return {"error": f"검색 API 요청 실패: {response.status_code} - {response.text}"}
+
+    # Step 2: bookKey 전부 추출
+    data = response.json().get("data", {})
+    book_list = data.get("bookList", [])
+
+    book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
+
+    if not book_keys:
+        return {"message": "검색 결과가 없습니다.", "books": []}
+
+    # Step 3: bookKey별로 상세 정보 요청
+    details = []
+
+    for i, key in enumerate(book_keys, 1):
+        try:
+            # 직접 fetch_book_info 함수를 사용해 상세 정보 가져오기
+            book_detail = fetch_book_info(key)
+            book_detail["bookKey"] = key  # bookKey도 결과에 포함
+            details.append(book_detail)
+            # 서버에 부담 주지 않게 0.3초 대기
+            time.sleep(0.3)
+        except Exception as e:
+            # 오류가 발생한 항목은 오류 정보와 함께 추가
+            details.append({
+                "bookKey": key,
+                "error": str(e)
+            })
+
+    # Step 4: 결과 딕셔너리 생성 및 반환
+    result = {
+        "keyword": book_name,
+        "total_count": len(details),
+        "books": details
+    }
+    
+    return result
 
 # 📌 [기존 기능 유지] - CNN 모델 준비
 base_model = VGG16(weights='imagenet')
