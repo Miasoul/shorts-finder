@@ -1,4 +1,3 @@
-import asyncio
 from flask import Flask, request, jsonify
 import os
 import pickle
@@ -16,9 +15,8 @@ import sqlite3
 import base64
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-from playwright.async_api import async_playwright  # 비동기 Playwright 임포트
-import aiohttp  # 비동기 HTTP 요청을 위한 aiohttp
-import time  # 요청 간 딜레이를 위한 time 모듈
+from playwright.sync_api import sync_playwright  # 추가: Playwright 임포트
+import time  # 추가: 요청 간 딜레이를 위한 time 모듈
 
 app = Flask(__name__)
 CORS(app)
@@ -105,7 +103,7 @@ def fetch_book_info(book_key):
     url = f"https://read365.edunet.net/PureScreen/SearchDetail?bookKey={book_key}&speciesKey=34169559343&provCode=J10&neisCode=J100000477&schoolName=관양고등학교"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True)  # 창 안 뜨게 하려면 True
         page = browser.new_page()
         page.goto(url, timeout=10000)
 
@@ -119,7 +117,7 @@ def fetch_book_info(book_key):
 
 # 📌 [새로운 기능] - 도서명으로 검색하는 API
 @app.route('/search_book_name', methods=['POST'])
-async def search_book_name_api():
+def search_book_name_api():
     data = request.json
     book_name = data.get("book_name")
     
@@ -127,13 +125,13 @@ async def search_book_name_api():
         return jsonify({"error": "도서명이 제공되지 않았습니다."}), 400
     
     try:
-        results = await search_book_name(book_name)
+        results = search_book_name(book_name)
         return jsonify(results), 200
     except Exception as e:
         return jsonify({"error": f"도서명 검색 중 오류 발생: {str(e)}"}), 500
 
-async def search_book_name(book_name):
-    """도서명으로 검색하는 비동기 함수"""
+def search_book_name(book_name):
+    """도서명으로 검색하는 함수"""
     # Step 1: 검색 API에 요청
     search_url = "https://read365.edunet.net/alpasq/api/search"
     headers = {"Content-Type": "application/json"}
@@ -145,32 +143,46 @@ async def search_book_name(book_name):
         "coverYn": "N"
     }
 
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:  # 전체 타임아웃 30초 설정
-            async with session.post(search_url, json=payload, headers=headers) as response:
-                if response.status != 200:
-                    return {"error": f"검색 API 요청 실패: {response.status} - {response.text}"}
+    response = requests.post(search_url, json=payload, headers=headers)
 
-                data = await response.json()
-                book_list = data.get("data", {}).get("bookList", [])
-                book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
+    if not response.ok:
+        return {"error": f"검색 API 요청 실패: {response.status_code} - {response.text}"}
 
-                if not book_keys:
-                    return {"message": "검색 결과가 없습니다.", "books": []}
+    # Step 2: bookKey 전부 추출
+    data = response.json().get("data", {})
+    book_list = data.get("bookList", [])
 
-                # 비동기적으로 상세 정보 요청
-                tasks = [fetch_book_info(key) for key in book_keys]
-                book_details = await asyncio.gather(*tasks)
+    book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
 
-                return {
-                    "keyword": book_name,
-                    "total_count": len(book_details),
-                    "books": book_details
-                }
-    except asyncio.TimeoutError:
-        return {"error": "요청 시간이 초과되었습니다. 다시 시도해주세요."}
-    except Exception as e:
-        return {"error": f"알 수 없는 오류 발생: {str(e)}"}
+    if not book_keys:
+        return {"message": "검색 결과가 없습니다.", "books": []}
+
+    # Step 3: bookKey별로 상세 정보 요청
+    details = []
+
+    for i, key in enumerate(book_keys, 1):
+        try:
+            # 직접 fetch_book_info 함수를 사용해 상세 정보 가져오기
+            book_detail = fetch_book_info(key)
+            book_detail["bookKey"] = key  # bookKey도 결과에 포함
+            details.append(book_detail)
+            # 서버에 부담 주지 않게 0.3초 대기
+            time.sleep(0.3)
+        except Exception as e:
+            # 오류가 발생한 항목은 오류 정보와 함께 추가
+            details.append({
+                "bookKey": key,
+                "error": str(e)
+            })
+
+    # Step 4: 결과 딕셔너리 생성 및 반환
+    result = {
+        "keyword": book_name,
+        "total_count": len(details),
+        "books": details
+    }
+    
+    return result
 
 # 📌 [기존 기능 유지] - CNN 모델 준비
 base_model = VGG16(weights='imagenet')
