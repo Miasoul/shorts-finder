@@ -31,11 +31,20 @@ app.secret_key = secrets.token_hex(16)
 CORS(app)
 
 # 요청 제한 설정 (rate limiting)
-limiter = Limiter(
-    app,
-    key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
-)
+# Flask-Limiter 최신 버전 지원
+try:
+    limiter = Limiter(
+        key_func=get_remote_address,
+        app=app,
+        default_limits=["200 per day", "50 per hour"]
+    )
+except TypeError:
+    # 이전 버전 지원
+    limiter = Limiter(
+        app,
+        key_func=get_remote_address,
+        default_limits=["200 per day", "50 per hour"]
+    )
 
 # 로깅 설정
 if not os.path.exists('logs'):
