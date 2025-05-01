@@ -15,14 +15,25 @@ import sqlite3
 import base64
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-from playwright.sync_api import sync_playwright  # 추가: Playwright 임포트
-import time  # 추가: 요청 간 딜레이를 위한 time 모듈
+from playwright.sync_api import sync_playwright
+import time
+import concurrent.futures
+import threading
+import functools
+import json
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
 
 # SQLite 데이터베이스 초기화
 DB_PATH = "users.db"
+CACHE_DB_PATH = "book_cache.db"  # 캐시용 데이터베이스 추가
+
+# 전역 Playwright 인스턴스를 위한 변수
+playwright = None
+browser = None
+browser_lock = threading.Lock()  # 스레드 안전을 위한 락
 
 def init_db():
     """SQLite 데이터베이스 초기화 (회원 테이블 생성)"""
@@ -38,10 +49,41 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    
+    # 캐시 데이터베이스 초기화
+    conn = sqlite3.connect(CACHE_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS book_cache (
+            book_key TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            img TEXT NOT NULL,
+            timestamp DATETIME NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-init_db()  # 서버 실행 시 데이터베이스 초기화
+def init_playwright():
+    """전역 Playwright 인스턴스 초기화"""
+    global playwright, browser
+    if playwright is None:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=True)
+        
+def get_browser():
+    """스레드 안전하게 브라우저 인스턴스 반환"""
+    with browser_lock:
+        if browser is None or playwright is None:
+            init_playwright()
+        return browser
 
-# 📌 [회원가입 API]
+# 서버 시작 시 DB와 Playwright 초기화
+init_db()
+init_playwright()
+
+# 📌 [회원가입 API] - 기존 코드 유지
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
@@ -63,7 +105,7 @@ def register():
     except sqlite3.IntegrityError:
         return jsonify({"error": "이미 존재하는 아이디입니다."}), 400
 
-# 📌 [로그인 API]
+# 📌 [로그인 API] - 기존 코드 유지
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
@@ -84,7 +126,97 @@ def login():
     else:
         return jsonify({"error": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
 
-# 📌 [새로운 기능] - 도서 검색 API (bookKey로 검색)
+# 캐시를 확인하고 있으면 반환, 없으면 None 반환
+def get_cached_book_info(book_key):
+    conn = sqlite3.connect(CACHE_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT title, status, img, timestamp FROM book_cache WHERE book_key = ?", 
+        (book_key,)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        # 캐시가 24시간 이내인지 확인
+        cache_time = datetime.strptime(result[3], "%Y-%m-%d %H:%M:%S")
+        if datetime.now() - cache_time < timedelta(hours=24):
+            return {
+                "title": result[0],
+                "status": result[1],
+                "img": result[2]
+            }
+    return None
+
+# 캐시에 도서 정보 저장
+def cache_book_info(book_key, title, status, img):
+    conn = sqlite3.connect(CACHE_DB_PATH)
+    cursor = conn.cursor()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute(
+        "INSERT OR REPLACE INTO book_cache (book_key, title, status, img, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (book_key, title, status, img, timestamp)
+    )
+    conn.commit()
+    conn.close()
+
+# 최적화된 도서 정보 가져오기 함수
+def fetch_book_info(book_key):
+    """책 정보를 가져오는 함수 (캐싱 적용)"""
+    # 캐시에서 먼저 확인
+    cached_info = get_cached_book_info(book_key)
+    if cached_info:
+        return cached_info
+    
+    # 캐시에 없으면 직접 가져오기
+    url = f"https://read365.edunet.net/PureScreen/SearchDetail?bookKey={book_key}&speciesKey=34169559343&provCode=J10&neisCode=J100000477&schoolName=관양고등학교"
+
+    try:
+        browser_instance = get_browser()
+        page = browser_instance.new_page()
+        page.goto(url, timeout=5000)  # 타임아웃 줄임 (5초)
+
+        # XPath 위치 그대로 가져오기
+        title = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3").inner_text()
+        status = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div").inner_text()
+        img = page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img').get_attribute('src')
+        page.close()
+
+        result = {"title": title.strip(), "status": status.strip(), "img": img}
+        
+        # 결과 캐싱
+        cache_book_info(book_key, title.strip(), status.strip(), img)
+        
+        return result
+    except Exception as e:
+        if 'page' in locals():
+            page.close()
+        raise e
+
+# 병렬로 도서 정보 가져오기
+def fetch_book_info_parallel(book_keys, max_workers=10, limit=40):
+    """여러 도서 정보를 병렬로 가져오는 함수"""
+    # 결과 개수 제한
+    book_keys = book_keys[:min(len(book_keys), limit)]
+    results = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_key = {executor.submit(fetch_book_info, key): key for key in book_keys}
+        
+        for future in concurrent.futures.as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                data = future.result()
+                data["bookKey"] = key  # bookKey도 결과에 포함
+                results.append(data)
+            except Exception as e:
+                # 오류가 발생한 항목은 오류 정보와 함께 추가
+                results.append({"bookKey": key, "error": str(e)})
+                
+    return results
+
+# 📌 [도서 검색 API] - 단일 도서 검색
 @app.route('/search_book', methods=['POST'])
 def search_book():
     data = request.json
@@ -99,40 +231,24 @@ def search_book():
     except Exception as e:
         return jsonify({"error": f"도서 정보 검색 중 오류 발생: {str(e)}"}), 500
 
-def fetch_book_info(book_key):
-    """책 정보를 가져오는 함수"""
-    url = f"https://read365.edunet.net/PureScreen/SearchDetail?bookKey={book_key}&speciesKey=34169559343&provCode=J10&neisCode=J100000477&schoolName=관양고등학교"
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # 창 안 뜨게 하려면 True
-        page = browser.new_page()
-        page.goto(url, timeout=10000)
-
-        # XPath 위치 그대로 가져오기
-        title = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3").inner_text()
-        status = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div").inner_text()
-        img = page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img').get_attribute('src')
-        browser.close()
-
-        return {"title": title.strip(), "status": status.strip(), "img": img}
-
-# 📌 [새로운 기능] - 도서명으로 검색하는 API
+# 📌 [최적화된 도서명 검색 API]
 @app.route('/search_book_name', methods=['POST'])
 def search_book_name_api():
     data = request.json
     book_name = data.get("book_name")
+    limit = data.get("limit", 40)  # 기본값 40개로 설정
     
     if not book_name:
         return jsonify({"error": "도서명이 제공되지 않았습니다."}), 400
     
     try:
-        results = search_book_name(book_name)
+        results = search_book_name(book_name, limit)
         return jsonify(results), 200
     except Exception as e:
         return jsonify({"error": f"도서명 검색 중 오류 발생: {str(e)}"}), 500
 
-def search_book_name(book_name):
-    """도서명으로 검색하는 함수"""
+def search_book_name(book_name, limit=40):
+    """도서명으로 검색하는 함수 (최적화 버전)"""
     # Step 1: 검색 API에 요청
     search_url = "https://read365.edunet.net/alpasq/api/search"
     headers = {"Content-Type": "application/json"}
@@ -158,29 +274,17 @@ def search_book_name(book_name):
     if not book_keys:
         return {"message": "검색 결과가 없습니다.", "books": []}
 
-    # Step 3: bookKey별로 상세 정보 요청
-    details = []
-
-    for i, key in enumerate(book_keys, 1):
-        try:
-            # 직접 fetch_book_info 함수를 사용해 상세 정보 가져오기
-            book_detail = fetch_book_info(key)
-            book_detail["bookKey"] = key  # bookKey도 결과에 포함
-            details.append(book_detail)
-            # 서버에 부담 주지 않게 0.3초 대기
-            time.sleep(0.3)
-        except Exception as e:
-            # 오류가 발생한 항목은 오류 정보와 함께 추가
-            details.append({
-                "bookKey": key,
-                "error": str(e)
-            })
+    # Step 3: 병렬로 도서 정보 가져오기 (최대 40개로 제한)
+    start_time = time.time()
+    details = fetch_book_info_parallel(book_keys, max_workers=10, limit=limit)
+    end_time = time.time()
 
     # Step 4: 결과 딕셔너리 생성 및 반환
     result = {
         "keyword": book_name,
         "total_count": len(details),
-        "books": details
+        "books": details,
+        "processing_time": f"{end_time - start_time:.2f}초"
     }
     
     return result
@@ -263,6 +367,18 @@ def find_similar_video():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+# 서버 종료 시 리소스 정리 함수
+def cleanup():
+    global browser, playwright
+    if browser:
+        browser.close()
+    if playwright:
+        playwright.stop()
+
+# 프로그램 종료 시 리소스 정리를 위한 atexit 등록
+import atexit
+atexit.register(cleanup)
 
 # 📌 [기존 기능 유지] - 서버 실행
 if __name__ == '__main__':
