@@ -212,33 +212,103 @@ def fetch_book_info(book_key):
         # 페이지가 완전히 로드될 때까지 대기
         page.wait_for_load_state('networkidle')
         
-        # CSS 셀렉터를 사용하여 더 안정적으로 선택 (XPath 대신)
-        if page.query_selector('.book-detail-info h3') is not None:
-            title = page.query_selector('.book-detail-info h3').inner_text().strip()
-        else:
-            # 대체 XPath 시도
-            title = page.locator("//h3[contains(@class, 'tit') or contains(@class, 'title')]").first.inner_text().strip()
-            if not title:
-                title = page.title()  # 페이지 제목이라도 가져오기
+        # 타이틀 정보 추출 - 다양한 방법 시도
+        title = None
         
-        # 대출 상태 확인
-        if page.query_selector('.book-detail-thumb .state') is not None:
-            status = page.query_selector('.book-detail-thumb .state').inner_text().strip()
-        else:
-            # 대체 방법으로 상태 확인
-            status_elem = page.locator("//*[contains(@class, 'state') or contains(@class, 'status')]").first
-            status = status_elem.inner_text().strip() if status_elem.count() > 0 else "상태 정보 없음"
+        # 1. 원본 XPath 방식 시도 (가장 정확한 방식)
+        try:
+            xpath_title = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3")
+            if xpath_title.count() > 0:
+                title = xpath_title.inner_text().strip()
+        except:
+            pass
+            
+        # 2. CSS 선택자 시도 (백업 방식)
+        if not title:
+            try:
+                if page.query_selector('.book-detail-info h3'):
+                    title = page.query_selector('.book-detail-info h3').inner_text().strip()
+            except:
+                pass
         
-        # 이미지 URL 가져오기
-        if page.query_selector('.book-detail-thumb img') is not None:
-            img = page.query_selector('.book-detail-thumb img').get_attribute('src')
-            # 상대 경로인 경우 절대 경로로 변환
-            if img and img.startswith('/'):
-                img = f"https://read365.edunet.net{img}"
-        else:
-            # 대체 방법
-            img_elem = page.locator("//img[contains(@alt, '책표지') or contains(@class, 'cover')]").first
-            img = img_elem.get_attribute('src') if img_elem.count() > 0 else "/api/placeholder/120/180"
+        # 3. 일반적인 클래스 찾기 방식 (최후의 방식)
+        if not title:
+            try:
+                title_elem = page.locator("//h3[contains(@class, 'tit') or contains(@class, 'title')]").first
+                if title_elem.count() > 0:
+                    title = title_elem.inner_text().strip()
+            except:
+                pass
+                
+        # 마지막 방법: 페이지 제목 사용
+        if not title:
+            title = page.title() or f"도서 {book_key}"
+            
+        # 상태 정보 추출 - 다양한 방법 시도
+        status = None
+        
+        # 1. 원본 XPath 방식 시도 (가장 정확한 방식)
+        try:
+            xpath_status = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div")
+            if xpath_status.count() > 0:
+                status = xpath_status.inner_text().strip()
+        except:
+            pass
+            
+        # 2. CSS 선택자 시도 (백업 방식)
+        if not status:
+            try:
+                if page.query_selector('.book-detail-thumb .state'):
+                    status = page.query_selector('.book-detail-thumb .state').inner_text().strip()
+            except:
+                pass
+                
+        # 3. 일반적인 클래스 찾기 방식 (최후의 방식)
+        if not status:
+            try:
+                status_elem = page.locator("//*[contains(@class, 'state') or contains(@class, 'status')]").first
+                if status_elem.count() > 0:
+                    status = status_elem.inner_text().strip()
+            except:
+                pass
+                
+        # 상태 정보가 없으면 디폴트 값 설정
+        if not status:
+            status = "상태 정보 없음"
+        
+        # 이미지 URL 가져오기 - 다양한 방법 시도
+        img = None
+        
+        # 1. 원본 XPath 방식 시도
+        try:
+            xpath_img = page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img')
+            if xpath_img.count() > 0:
+                img = xpath_img.get_attribute('src')
+        except:
+            pass
+            
+        # 2. CSS 선택자 시도
+        if not img:
+            try:
+                if page.query_selector('.book-detail-thumb img'):
+                    img = page.query_selector('.book-detail-thumb img').get_attribute('src')
+            except:
+                pass
+                
+        # 3. 일반적인 방식
+        if not img:
+            try:
+                img_elem = page.locator("//img[contains(@alt, '책표지') or contains(@class, 'cover')]").first
+                if img_elem.count() > 0:
+                    img = img_elem.get_attribute('src')
+            except:
+                pass
+                
+        # 상대 경로인 경우 절대 경로로 변환
+        if img and img.startswith('/'):
+            img = f"https://read365.edunet.net{img}"
+        elif not img:
+            img = "/api/placeholder/120/180"  # 기본 placeholder 이미지
         
         page.close()
 
@@ -260,7 +330,6 @@ def fetch_book_info(book_key):
         if 'page' in locals():
             page.close()
         raise e
-
 # 병렬로 도서 정보 가져오기
 def fetch_book_info_parallel(book_keys, max_workers=10, limit=40):
     """여러 도서 정보를 병렬로 가져오는 함수"""
