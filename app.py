@@ -1,10 +1,11 @@
+import asyncio
+import aiohttp
 from flask import Flask, request, jsonify
 import os
 import pickle
 import cv2
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import requests
 from io import BytesIO
 from PIL import Image
 from tensorflow.keras.applications import VGG16
@@ -15,8 +16,8 @@ import sqlite3
 import base64
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
-from playwright.sync_api import sync_playwright  # 추가: Playwright 임포트
-import time  # 추가: 요청 간 딜레이를 위한 time 모듈
+from playwright.async_api import async_playwright  # 비동기 Playwright 임포트
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -98,24 +99,24 @@ def search_book():
     except Exception as e:
         return jsonify({"error": f"도서 정보 검색 중 오류 발생: {str(e)}"}), 500
 
-def fetch_book_info(book_key):
-    """책 정보를 가져오는 함수"""
+async def fetch_book_info(book_key):
+    """책 정보를 가져오는 비동기 함수"""
     url = f"https://read365.edunet.net/PureScreen/SearchDetail?bookKey={book_key}&speciesKey=34169559343&provCode=J10&neisCode=J100000477&schoolName=관양고등학교"
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # 창 안 뜨게 하려면 True
-        page = browser.new_page()
-        page.goto(url, timeout=10000)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(url, timeout=10000)
 
         # XPath 위치 그대로 가져오기
-        title = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3").inner_text()
-        status = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div").inner_text()
-        img = page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img').get_attribute('src')
-        browser.close()
+        title = await page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3").inner_text()
+        status = await page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div").inner_text()
+        img = await page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img').get_attribute('src')
+        await browser.close()
 
         return {"title": title.strip(), "status": status.strip(), "img": img}
 
-# 📌 [새로운 기능] - 도서명으로 검색하는 API
+# 📌 [도서명으로 검색하는 비동기 API]
 @app.route('/search_book_name', methods=['POST'])
 def search_book_name_api():
     data = request.json
@@ -125,14 +126,15 @@ def search_book_name_api():
         return jsonify({"error": "도서명이 제공되지 않았습니다."}), 400
     
     try:
-        results = search_book_name(book_name)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        results = loop.run_until_complete(search_book_name(book_name))
         return jsonify(results), 200
     except Exception as e:
         return jsonify({"error": f"도서명 검색 중 오류 발생: {str(e)}"}), 500
 
-def search_book_name(book_name):
-    """도서명으로 검색하는 함수"""
-    # Step 1: 검색 API에 요청
+async def search_book_name(book_name):
+    """도서명으로 검색하는 비동기 함수"""
     search_url = "https://read365.edunet.net/alpasq/api/search"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -143,46 +145,29 @@ def search_book_name(book_name):
         "coverYn": "N"
     }
 
-    response = requests.post(search_url, json=payload, headers=headers)
+    async with aiohttp.ClientSession() as session:
+        # Step 1: 검색 API에 요청
+        async with session.post(search_url, json=payload, headers=headers) as response:
+            if response.status != 200:
+                return {"error": f"검색 API 요청 실패: {response.status} - {response.text}"}
+            
+            data = await response.json()
+            book_list = data.get("data", {}).get("bookList", [])
+            book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
+            
+            if not book_keys:
+                return {"message": "검색 결과가 없습니다.", "books": []}
+            
+            # 비동기적으로 상세 정보 요청
+            tasks = [fetch_book_info(key) for key in book_keys]
+            book_details = await asyncio.gather(*tasks)
 
-    if not response.ok:
-        return {"error": f"검색 API 요청 실패: {response.status_code} - {response.text}"}
-
-    # Step 2: bookKey 전부 추출
-    data = response.json().get("data", {})
-    book_list = data.get("bookList", [])
-
-    book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
-
-    if not book_keys:
-        return {"message": "검색 결과가 없습니다.", "books": []}
-
-    # Step 3: bookKey별로 상세 정보 요청
-    details = []
-
-    for i, key in enumerate(book_keys, 1):
-        try:
-            # 직접 fetch_book_info 함수를 사용해 상세 정보 가져오기
-            book_detail = fetch_book_info(key)
-            book_detail["bookKey"] = key  # bookKey도 결과에 포함
-            details.append(book_detail)
-            # 서버에 부담 주지 않게 0.3초 대기
-            time.sleep(0.3)
-        except Exception as e:
-            # 오류가 발생한 항목은 오류 정보와 함께 추가
-            details.append({
-                "bookKey": key,
-                "error": str(e)
-            })
-
-    # Step 4: 결과 딕셔너리 생성 및 반환
-    result = {
-        "keyword": book_name,
-        "total_count": len(details),
-        "books": details
-    }
-    
-    return result
+            # 결과 반환
+            return {
+                "keyword": book_name,
+                "total_count": len(book_details),
+                "books": book_details
+            }
 
 # 📌 [기존 기능 유지] - CNN 모델 준비
 base_model = VGG16(weights='imagenet')
