@@ -32,7 +32,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
+            password TEXT NOT NULL,
+            name TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -46,7 +47,7 @@ def register():
     data = request.json
     username = data.get("username")
     password = data.get("password")
-
+    name = data.get("name")
     if not username or not password:
         return jsonify({"error": "아이디와 비밀번호를 입력하세요."}), 400
 
@@ -55,7 +56,7 @@ def register():
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_password))
+        cursor.execute("INSERT INTO users (username, password, name) VALUES (?, ?, ?)", (username, hashed_password,name))
         conn.commit()
         conn.close()
         return jsonify({"message": "회원가입 성공!"}), 201
@@ -74,12 +75,12 @@ def login():
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT password FROM users WHERE username = ?", (username,))
+    cursor.execute("SELECT password, name FROM users WHERE username = ?", (username,))
     user = cursor.fetchone()
     conn.close()
 
     if user and check_password_hash(user[0], password):
-        return jsonify({"message": "로그인 성공!"}), 200
+        return jsonify({"message": "로그인 성공!", "name": user[1]}), 200
     else:
         return jsonify({"error": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
 
