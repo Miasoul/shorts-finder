@@ -15,6 +15,7 @@ import sqlite3
 import base64
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+from playwright.sync_api import sync_playwright  # 추가: Playwright 임포트
 
 app = Flask(__name__)
 CORS(app)
@@ -80,6 +81,38 @@ def login():
         return jsonify({"message": "로그인 성공!"}), 200
     else:
         return jsonify({"error": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
+
+# 📌 [새로운 기능] - 도서 검색 API
+@app.route('/search_book', methods=['POST'])
+def search_book():
+    data = request.json
+    book_key = data.get("book_key")
+    
+    if not book_key:
+        return jsonify({"error": "도서 키가 제공되지 않았습니다."}), 400
+    
+    try:
+        book_info = fetch_book_info(book_key)
+        return jsonify(book_info), 200
+    except Exception as e:
+        return jsonify({"error": f"도서 정보 검색 중 오류 발생: {str(e)}"}), 500
+
+def fetch_book_info(book_key):
+    """책 정보를 가져오는 함수"""
+    url = f"https://read365.edunet.net/PureScreen/SearchDetail?bookKey={book_key}&speciesKey=34169559343&provCode=J10&neisCode=J100000477&schoolName=관양고등학교"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)  # 창 안 뜨게 하려면 True
+        page = browser.new_page()
+        page.goto(url, timeout=10000)
+
+        # XPath 위치 그대로 가져오기
+        title = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3").inner_text()
+        status = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div").inner_text()
+        img = page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img').get_attribute('src')
+        browser.close()
+
+        return {"title": title.strip(), "status": status.strip(), "img": img}
 
 # 📌 [기존 기능 유지] - CNN 모델 준비
 base_model = VGG16(weights='imagenet')
