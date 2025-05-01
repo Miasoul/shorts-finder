@@ -34,6 +34,7 @@ CACHE_DB_PATH = "book_cache.db"  # 캐시용 데이터베이스 추가
 playwright = None
 browser = None
 browser_lock = threading.Lock()  # 스레드 안전을 위한 락
+debug_mode = True  # 디버깅 메시지 출력 여부
 
 def init_db():
     """SQLite 데이터베이스 초기화 (회원 테이블 생성)"""
@@ -64,18 +65,47 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    
+    if debug_mode:
+        print("[DB] 데이터베이스 초기화 완료")
 
 def init_playwright():
     """전역 Playwright 인스턴스 초기화"""
     global playwright, browser
     if playwright is None:
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=True)
+        try:
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage']
+            )
+            if debug_mode:
+                print("[Playwright] 브라우저 인스턴스 성공적으로 생성됨")
+        except Exception as e:
+            print(f"[Playwright] 브라우저 초기화 오류: {str(e)}")
+            if playwright:
+                playwright.stop()
+            playwright = None
+            browser = None
+            raise
         
 def get_browser():
     """스레드 안전하게 브라우저 인스턴스 반환"""
     with browser_lock:
         if browser is None or playwright is None:
+            init_playwright()
+        # 간단한 브라우저 상태 검사
+        try:
+            # 브라우저가 정상인지 테스트
+            if browser:
+                browser.new_page().close()  # 테스트 페이지 열고 닫기
+            else:
+                init_playwright()  # 브라우저 재초기화
+        except Exception as e:
+            if debug_mode:
+                print(f"[Playwright] 브라우저 재초기화 필요: {str(e)}")
+            # 문제가 있으면 재시작
+            cleanup()
             init_playwright()
         return browser
 
@@ -175,18 +205,55 @@ def fetch_book_info(book_key):
     try:
         browser_instance = get_browser()
         page = browser_instance.new_page()
-        page.goto(url, timeout=5000)  # 타임아웃 줄임 (5초)
-
-        # XPath 위치 그대로 가져오기
-        title = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3").inner_text()
-        status = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div").inner_text()
-        img = page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img').get_attribute('src')
+        # 페이지 로드 전 타임아웃 설정
+        page.set_default_timeout(10000)  # 10초로 설정
+        page.goto(url)
+        
+        # 페이지가 완전히 로드될 때까지 대기
+        page.wait_for_load_state('networkidle')
+        
+        # CSS 셀렉터를 사용하여 더 안정적으로 선택 (XPath 대신)
+        if page.query_selector('.book-detail-info h3') is not None:
+            title = page.query_selector('.book-detail-info h3').inner_text().strip()
+        else:
+            # 대체 XPath 시도
+            title = page.locator("//h3[contains(@class, 'tit') or contains(@class, 'title')]").first.inner_text().strip()
+            if not title:
+                title = page.title()  # 페이지 제목이라도 가져오기
+        
+        # 대출 상태 확인
+        if page.query_selector('.book-detail-thumb .state') is not None:
+            status = page.query_selector('.book-detail-thumb .state').inner_text().strip()
+        else:
+            # 대체 방법으로 상태 확인
+            status_elem = page.locator("//*[contains(@class, 'state') or contains(@class, 'status')]").first
+            status = status_elem.inner_text().strip() if status_elem.count() > 0 else "상태 정보 없음"
+        
+        # 이미지 URL 가져오기
+        if page.query_selector('.book-detail-thumb img') is not None:
+            img = page.query_selector('.book-detail-thumb img').get_attribute('src')
+            # 상대 경로인 경우 절대 경로로 변환
+            if img and img.startswith('/'):
+                img = f"https://read365.edunet.net{img}"
+        else:
+            # 대체 방법
+            img_elem = page.locator("//img[contains(@alt, '책표지') or contains(@class, 'cover')]").first
+            img = img_elem.get_attribute('src') if img_elem.count() > 0 else "/api/placeholder/120/180"
+        
         page.close()
 
-        result = {"title": title.strip(), "status": status.strip(), "img": img}
+        # 데이터 유효성 검사 - undefined나 빈 값이 아닌지 확인
+        if not title or title == "undefined":
+            title = f"도서 {book_key}"
+        if not status or status == "undefined":
+            status = "상태 정보 없음"
+        if not img or img == "undefined" or "undefined" in img:
+            img = "/api/placeholder/120/180"  # 기본 placeholder 이미지
+        
+        result = {"title": title, "status": status, "img": img}
         
         # 결과 캐싱
-        cache_book_info(book_key, title.strip(), status.strip(), img)
+        cache_book_info(book_key, title, status, img)
         
         return result
     except Exception as e:
@@ -200,21 +267,54 @@ def fetch_book_info_parallel(book_keys, max_workers=10, limit=40):
     # 결과 개수 제한
     book_keys = book_keys[:min(len(book_keys), limit)]
     results = []
+    errors = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_key = {executor.submit(fetch_book_info, key): key for key in book_keys}
+    if debug_mode:
+        print(f"[병렬처리] {len(book_keys)}개 도서 정보 병렬 처리 시작")
+    
+    # 캐시에서 먼저 확인하여 이미 있는 항목은 건너뛰기
+    to_fetch_keys = []
+    cached_results = []
+    
+    for key in book_keys:
+        cached = get_cached_book_info(key)
+        if cached:
+            cached["bookKey"] = key
+            cached_results.append(cached)
+        else:
+            to_fetch_keys.append(key)
+    
+    if debug_mode:
+        print(f"[병렬처리] 캐시에서 {len(cached_results)}개 항목 로드, {len(to_fetch_keys)}개 항목 가져오기 필요")
+    
+    # 캐시에 없는 항목만 병렬로 가져오기
+    if to_fetch_keys:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_key = {executor.submit(fetch_book_info, key): key for key in to_fetch_keys}
+            
+            for future in concurrent.futures.as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    data = future.result()
+                    data["bookKey"] = key  # bookKey도 결과에 포함
+                    results.append(data)
+                except Exception as e:
+                    errors.append(f"도서 {key} 처리 중 오류: {str(e)}")
+                    # 기본 정보로 대체
+                    results.append({
+                        "bookKey": key, 
+                        "title": f"도서 {key}", 
+                        "status": "상태 정보 없음",
+                        "img": "/api/placeholder/120/180"
+                    })
+    
+    # 캐시된 결과와 새로 가져온 결과 합치기
+    all_results = cached_results + results
+    
+    if debug_mode and errors:
+        print(f"[병렬처리] {len(errors)}개 오류 발생: {errors[:3]}{'...' if len(errors) > 3 else ''}")
         
-        for future in concurrent.futures.as_completed(future_to_key):
-            key = future_to_key[future]
-            try:
-                data = future.result()
-                data["bookKey"] = key  # bookKey도 결과에 포함
-                results.append(data)
-            except Exception as e:
-                # 오류가 발생한 항목은 오류 정보와 함께 추가
-                results.append({"bookKey": key, "error": str(e)})
-                
-    return results
+    return all_results
 
 # 📌 [도서 검색 API] - 단일 도서 검색
 @app.route('/search_book', methods=['POST'])
@@ -243,51 +343,145 @@ def search_book_name_api():
     
     try:
         results = search_book_name(book_name, limit)
+        
+        # 결과 검증 및 정제
+        if "books" in results:
+            # undefined 값 확인하고 처리
+            for i, book in enumerate(results["books"]):
+                if "title" not in book or not book["title"] or book["title"] == "undefined":
+                    results["books"][i]["title"] = f"도서 {book.get('bookKey', i+1)}"
+                if "status" not in book or not book["status"] or book["status"] == "undefined":
+                    results["books"][i]["status"] = "상태 정보 없음"
+                if "img" not in book or not book["img"] or book["img"] == "undefined" or "undefined" in book["img"]:
+                    results["books"][i]["img"] = "/api/placeholder/120/180"
+        
         return jsonify(results), 200
     except Exception as e:
         return jsonify({"error": f"도서명 검색 중 오류 발생: {str(e)}"}), 500
 
 def search_book_name(book_name, limit=40):
     """도서명으로 검색하는 함수 (최적화 버전)"""
-    # Step 1: 검색 API에 요청
-    search_url = "https://read365.edunet.net/alpasq/api/search"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "searchKeyword": book_name,
-        "neisCode": ["J100000477"],
-        "provCode": "J10",
-        "schoolName": "관양고등학교",
-        "coverYn": "N"
-    }
+    try:
+        # Step 1: 검색 API에 요청
+        search_url = "https://read365.edunet.net/alpasq/api/search"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        payload = {
+            "searchKeyword": book_name,
+            "neisCode": ["J100000477"],
+            "provCode": "J10",
+            "schoolName": "관양고등학교",
+            "coverYn": "Y"  # 표지 정보도 포함하도록 변경
+        }
 
-    response = requests.post(search_url, json=payload, headers=headers)
+        # API 응답 시간 설정 및 요청
+        response = requests.post(search_url, json=payload, headers=headers, timeout=10)
 
-    if not response.ok:
-        return {"error": f"검색 API 요청 실패: {response.status_code} - {response.text}"}
+        if not response.ok:
+            return {"error": f"검색 API 요청 실패: {response.status_code} - {response.text}"}
 
-    # Step 2: bookKey 전부 추출
-    data = response.json().get("data", {})
-    book_list = data.get("bookList", [])
+        # Step 2: API 응답에서 도서 정보 추출 및 전처리
+        data = response.json().get("data", {})
+        book_list = data.get("bookList", [])
+        
+        # API 응답에서 바로 기본 정보 추출 (표지 URL, 제목 등)
+        processed_books = []
+        for book in book_list[:min(len(book_list), limit)]:
+            book_key = book.get("bookKey")
+            if not book_key:
+                continue
+                
+            # 캐시에서 먼저 확인
+            cached_info = get_cached_book_info(book_key)
+            if cached_info:
+                cached_info["bookKey"] = book_key
+                processed_books.append(cached_info)
+                continue
+                
+            # 기본 정보 추출 - API 응답에서 가능한 많은 정보 추출
+            title = book.get("title", "")
+            if not title or title == "undefined":
+                title = book.get("bookNm", f"도서 {book_key}")
+                
+            # 표지 이미지 URL 생성
+            img_url = book.get("coverUrl")
+            if not img_url or img_url == "undefined":
+                # read365의 기본 표지 URL 형식 사용
+                img_url = f"https://read365.edunet.net/fileStorage/textbook/textfront/{book_key}.jpg"
+            elif img_url.startswith('/'):
+                img_url = f"https://read365.edunet.net{img_url}"
+                
+            # 대출 상태 (API에서 제공하지 않는 경우 직접 가져와야 함)
+            status = "상태 정보 로딩 중"
+            
+            book_info = {
+                "bookKey": book_key,
+                "title": title.strip() if title else f"도서 {book_key}",
+                "status": status,
+                "img": img_url
+            }
+            
+            processed_books.append(book_info)
+            
+            # 결과 캐싱 (상태 정보는 나중에 업데이트)
+            if title and img_url:
+                cache_book_info(book_key, title.strip(), status, img_url)
 
-    book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
+        # Step 3: 필요한 경우에만 상태 정보 병렬로 업데이트
+        # (이미 캐시된 항목은 건너뜀)
+        uncached_books = [book for book in processed_books if book["status"] == "상태 정보 로딩 중"]
+        if uncached_books:
+            start_time = time.time()
+            uncached_keys = [book["bookKey"] for book in uncached_books]
+            details = fetch_book_info_parallel(uncached_keys, max_workers=10, limit=limit)
+            
+            # 상태 정보 업데이트
+            for detail in details:
+                book_key = detail.get("bookKey")
+                if not book_key:
+                    continue
+                    
+                # processed_books에서 해당 책 찾기
+                for book in processed_books:
+                    if book.get("bookKey") == book_key:
+                        # 상태 정보 업데이트
+                        if "status" in detail and detail["status"] and detail["status"] != "undefined":
+                            book["status"] = detail["status"]
+                        
+                        # 더 나은 제목이나 이미지가 있으면 업데이트
+                        if "title" in detail and detail["title"] and detail["title"] != "undefined" and detail["title"] != f"도서 {book_key}":
+                            book["title"] = detail["title"]
+                            
+                        if "img" in detail and detail["img"] and detail["img"] != "undefined" and "undefined" not in detail["img"]:
+                            book["img"] = detail["img"]
+                            
+                        # 캐시 업데이트
+                        cache_book_info(book_key, book["title"], book["status"], book["img"])
+                        break
+            
+            end_time = time.time()
+            processing_time = end_time - start_time
+        else:
+            processing_time = 0
 
-    if not book_keys:
-        return {"message": "검색 결과가 없습니다.", "books": []}
-
-    # Step 3: 병렬로 도서 정보 가져오기 (최대 40개로 제한)
-    start_time = time.time()
-    details = fetch_book_info_parallel(book_keys, max_workers=10, limit=limit)
-    end_time = time.time()
-
-    # Step 4: 결과 딕셔너리 생성 및 반환
-    result = {
-        "keyword": book_name,
-        "total_count": len(details),
-        "books": details,
-        "processing_time": f"{end_time - start_time:.2f}초"
-    }
-    
-    return result
+        # Step 4: 결과 딕셔너리 생성 및 반환
+        result = {
+            "keyword": book_name,
+            "total_count": len(processed_books),
+            "books": processed_books,
+            "processing_time": f"{processing_time:.2f}초"
+        }
+        
+        return result
+    except Exception as e:
+        import traceback
+        return {
+            "error": f"도서명 검색 중 오류 발생: {str(e)}",
+            "trace": traceback.format_exc(),
+            "books": []
+        }
 
 # 📌 [기존 기능 유지] - CNN 모델 준비
 base_model = VGG16(weights='imagenet')
