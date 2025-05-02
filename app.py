@@ -136,7 +136,7 @@ def search_book_name(book_name):
             "searchKeyword": book_name,
             "neisCode": ["J100000477"],
             "provCode": "J10",
-            "page": i,
+            "page": f"{i+1}",
             "schoolName": "관양고등학교",
             "coverYn": "N"
         }
