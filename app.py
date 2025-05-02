@@ -101,20 +101,15 @@ def search_book():
 
 def fetch_book_info(book_key):
     """책 정보를 가져오는 함수"""
-    url = f"https://read365.edunet.net/PureScreen/SearchDetail?bookKey={book_key}&speciesKey=34169559343&provCode=J10&neisCode=J100000477&schoolName=관양고등학교"
+    
+    url = f'https://read365.edunet.net/alpasq/api/detail/info?bookKey={book_key}&speciesKey=34169559713&provCode=J10&neisCode=J100000477'
+    response = requests.get(url)
+    res = response.json()
+    title = res['data']['title']
+    img = res['data']['coverUrl']
+    status = res['data']['status']
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)  # 창 안 뜨게 하려면 True
-        page = browser.new_page()
-        page.goto(url, timeout=10000)
-
-        # XPath 위치 그대로 가져오기
-        title = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[2]/h3").inner_text()
-        status = page.locator("xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/div").inner_text()
-        img = page.locator('xpath=/html/body/div[1]/div/div[1]/div/div/article[1]/div[1]/div[1]/div[1]/div[1]/div[1]/img').get_attribute('src')
-        browser.close()
-
-        return {"title": title.strip(), "status": status.strip(), "img": img}
+    return {"title": title, "status": status, "img": img}
 
 # 📌 [새로운 기능] - 도서명으로 검색하는 API
 @app.route('/search_book_name', methods=['POST'])
@@ -168,7 +163,7 @@ def search_book_name(book_name):
             book_detail["bookKey"] = key  # bookKey도 결과에 포함
             details.append(book_detail)
             # 서버에 부담 주지 않게 0.3초 대기
-            time.sleep(0.3)
+            
         except Exception as e:
             # 오류가 발생한 항목은 오류 정보와 함께 추가
             details.append({
