@@ -129,49 +129,51 @@ def search_book_name_api():
 def search_book_name(book_name):
     """도서명으로 검색하는 함수"""
     # Step 1: 검색 API에 요청
-    search_url = "https://read365.edunet.net/alpasq/api/search"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "searchKeyword": book_name,
-        "neisCode": ["J100000477"],
-        "provCode": "J10",
-        "schoolName": "관양고등학교",
-        "coverYn": "N"
-    }
+    for i in range(5):
+        search_url = "https://read365.edunet.net/alpasq/api/search"
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "searchKeyword": book_name,
+            "neisCode": ["J100000477"],
+            "provCode": "J10",
+            "page": i,
+            "schoolName": "관양고등학교",
+            "coverYn": "N"
+        }
 
-    response = requests.post(search_url, json=payload, headers=headers)
+        response = requests.post(search_url, json=payload, headers=headers)
 
-    if not response.ok:
-        return {"error": f"검색 API 요청 실패: {response.status_code} - {response.text}"}
+        if not response.ok:
+            return {"error": f"검색 API 요청 실패: {response.status_code} - {response.text}"}
 
-    # Step 2: bookKey 전부 추출
-    data = response.json().get("data", {})
-    book_list = data.get("bookList", [])
+        # Step 2: bookKey 전부 추출
+        data = response.json().get("data", {})
+        book_list = data.get("bookList", [])
 
-    book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
+        book_keys = [book.get("bookKey") for book in book_list if "bookKey" in book]
 
-    if not book_keys:
-        return {"message": "검색 결과가 없습니다.", "books": []}
+        if not book_keys:
+            return {"message": "검색 결과가 없습니다.", "books": []}
 
-    # Step 3: bookKey별로 상세 정보 요청
-    details = []
+        # Step 3: bookKey별로 상세 정보 요청
+        details = []
 
-    for i, key in enumerate(book_keys, 1):
-        try:
-            # 직접 fetch_book_info 함수를 사용해 상세 정보 가져오기
-            book_detail = fetch_book_info(key)
-            book_detail["bookKey"] = key  # bookKey도 결과에 포함
-            details.append(book_detail)
-            # 서버에 부담 주지 않게 0.3초 대기
-            
-        except Exception as e:
-            # 오류가 발생한 항목은 오류 정보와 함께 추가
-            details.append({
-                "bookKey": key,
-                "error": str(e)
-            })
+        for i, key in enumerate(book_keys, 1):
+            try:
+                # 직접 fetch_book_info 함수를 사용해 상세 정보 가져오기
+                book_detail = fetch_book_info(key)
+                book_detail["bookKey"] = key  # bookKey도 결과에 포함
+                details.append(book_detail)
+                # 서버에 부담 주지 않게 0.3초 대기
+                
+            except Exception as e:
+                # 오류가 발생한 항목은 오류 정보와 함께 추가
+                details.append({
+                    "bookKey": key,
+                    "error": str(e)
+                })
 
-    # Step 4: 결과 딕셔너리 생성 및 반환
+        # Step 4: 결과 딕셔너리 생성 및 반환
     result = {
         "keyword": book_name,
         "total_count": len(details),
