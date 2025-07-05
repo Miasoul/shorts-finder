@@ -29,7 +29,7 @@ book_cache = TTLCache(maxsize=1000, ttl=3600)
 
 # SQLite 데이터베이스 초기화
 DB_PATH = "users.db"
-DB_LOCK = threading.Lock()  # 데이터베이스 접근을 위한 락
+DB_LOCK = threading.Lock()
 
 def init_db():
     """SQLite 데이터베이스 초기화 (회원 테이블 생성)"""
@@ -41,22 +41,23 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
                 password TEXT NOT NULL,
-                name TEXT NOT NULL
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
         """)
         conn.commit()
         conn.close()
 
-init_db()  # 서버 실행 시 데이터베이스 초기화
+init_db()
 
-# CNN 모델 로드 (전역 변수로 한 번만 로드)
+# CNN 모델 로드
 base_model = VGG16(weights='imagenet')
 model = Model(inputs=base_model.input, outputs=base_model.get_layer('fc1').output)
 
-# 세션 재사용을 위한 전역 세션 객체
+# 세션 재사용
 session = requests.Session()
 
-# 데이터베이스 연결 함수 - 컨텍스트 매니저
+# DB 연결 컨텍스트 매니저
 class DatabaseConnection:
     def __enter__(self):
         self.conn = sqlite3.connect(DB_PATH)
@@ -65,7 +66,7 @@ class DatabaseConnection:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.conn.close()
 
-# 📌 [회원가입 API]
+# 📌 회원가입 API
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
@@ -75,20 +76,23 @@ def register():
     if not username or not password:
         return jsonify({"error": "아이디와 비밀번호를 입력하세요."}), 400
 
-    hashed_password = generate_password_hash(password)  # 비밀번호 해싱
+    hashed_password = generate_password_hash(password)
+    created_at = time.strftime('%Y-%m-%d')  # 날짜만 저장
 
     try:
         with DB_LOCK:
             with DatabaseConnection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("INSERT INTO users (username, password, name) VALUES (?, ?, ?)", 
-                              (username, hashed_password, name))
+                cursor.execute("""
+                    INSERT INTO users (username, password, name, created_at)
+                    VALUES (?, ?, ?, ?)""",
+                    (username, hashed_password, name, created_at))
                 conn.commit()
         return jsonify({"message": "회원가입 성공!"}), 201
     except sqlite3.IntegrityError:
         return jsonify({"error": "이미 존재하는 아이디입니다."}), 400
 
-# 📌 [로그인 API]
+# 📌 로그인 API
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
@@ -100,13 +104,21 @@ def login():
 
     with DatabaseConnection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT password, name FROM users WHERE username = ?", (username,))
+        cursor.execute("SELECT password, name, created_at FROM users WHERE username = ?", (username,))
         user = cursor.fetchone()
 
     if user and check_password_hash(user[0], password):
-        return jsonify({"message": "로그인 성공!", "name": user[1]}), 200
+        return jsonify({
+            "message": "로그인 성공!",
+            "name": user[1],
+            "created_at": user[2]
+        }), 200
     else:
         return jsonify({"error": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
+
+# 앱 실행은 따로 구성 (예: run.py 등에서)
+# if __name__ == '__main__':
+#     app.run(debug=True)
 
 # 책 정보 캐싱 데코레이터
 @functools.lru_cache(maxsize=1000)
