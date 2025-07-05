@@ -108,6 +108,158 @@ def register():
         return jsonify({"message": "회원가입 성공!"}), 201 
     except sqlite3.IntegrityError: 
         return jsonify({"error": "이미 존재하는 아이디입니다."}), 400 
+# 📌 [관리자 전용 대출 취소 API] - 새로 추가
+@app.route('/admin_cancel_borrowing', methods=['POST'])
+def admin_cancel_borrowing():
+    """관리자가 강제로 대출을 취소하는 API"""
+    data = request.json
+    user_id = data.get("user_id")
+    book_id = data.get("book_id")
+    
+    if not user_id or not book_id:
+        return jsonify({"error": "사용자 ID와 도서 ID가 필요합니다."}), 400
+    
+    try:
+        with DatabaseConnection() as conn:
+            cursor = conn.cursor()
+            
+            # 대출 기록 확인
+            cursor.execute("""
+                SELECT id, book_title FROM borrowings 
+                WHERE user_id = ? AND book_id = ? AND status = 'borrowed'
+            """, (user_id, book_id))
+            borrowing = cursor.fetchone()
+            
+            if not borrowing:
+                return jsonify({"error": "해당 대출 기록을 찾을 수 없습니다."}), 404
+            
+            # 대출 상태를 'admin_cancelled'로 변경 (관리자 취소임을 표시)
+            cursor.execute("""
+                UPDATE borrowings 
+                SET status = 'admin_cancelled', return_date = ?
+                WHERE user_id = ? AND book_id = ? AND status = 'borrowed'
+            """, (time.strftime('%Y-%m-%d %H:%M:%S'), user_id, book_id))
+            
+            conn.commit()
+            
+            return jsonify({
+                "message": f"'{borrowing[1]}' 도서의 대출이 관리자에 의해 취소되었습니다.",
+                "book_title": borrowing[1],
+                "user_id": user_id,
+                "cancelled_at": time.strftime('%Y-%m-%d %H:%M:%S')
+            }), 200
+            
+    except Exception as e:
+        return jsonify({"error": f"대출 취소 중 오류 발생: {str(e)}"}), 500
+
+# 📌 [관리자 전용 대출 히스토리 조회 API] - 선택사항
+@app.route('/admin_borrowing_history', methods=['GET'])
+def get_admin_borrowing_history():
+    """관리자가 모든 대출 히스토리를 조회하는 API (취소된 것도 포함)"""
+    try:
+        with DatabaseConnection() as conn:
+            cursor = conn.cursor()
+            
+            # 모든 대출 기록 조회 (취소된 것도 포함)
+            cursor.execute("""
+                SELECT b.user_id, COALESCE(u.name, b.user_id) as user_name,
+                       b.book_id, b.book_title, b.borrow_date, b.return_date, b.status
+                FROM borrowings b
+                LEFT JOIN users u ON b.user_id = u.username
+                ORDER BY b.borrow_date DESC
+            """)
+            all_records = cursor.fetchall()
+        
+        history_list = []
+        for record in all_records:
+            history_list.append({
+                "user_id": record[0],
+                "user_name": record[1],
+                "book_id": record[2],
+                "book_title": record[3],
+                "borrow_date": record[4],
+                "return_date": record[5],
+                "status": record[6]
+            })
+        
+        # 상태별 집계
+        status_summary = {}
+        for record in history_list:
+            status = record['status']
+            if status not in status_summary:
+                status_summary[status] = 0
+            status_summary[status] += 1
+        
+        return jsonify({
+            "total_records": len(history_list),
+            "history": history_list,
+            "status_summary": status_summary
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "error": f"히스토리 조회 중 오류 발생: {str(e)}",
+            "history": []
+        }), 500
+
+# 📌 [관리자 전용 사용자 대출 현황 조회 API] - 선택사항
+@app.route('/admin_user_detail/<user_id>', methods=['GET'])
+def get_admin_user_detail(user_id):
+    """관리자가 특정 사용자의 상세 대출 현황을 조회하는 API"""
+    if not user_id:
+        return jsonify({"error": "사용자 ID가 필요합니다."}), 400
+    
+    try:
+        with DatabaseConnection() as conn:
+            cursor = conn.cursor()
+            
+            # 사용자 정보 조회
+            cursor.execute("""
+                SELECT name, created_at FROM users WHERE username = ?
+            """, (user_id,))
+            user_info = cursor.fetchone()
+            
+            # 사용자의 모든 대출 기록 조회
+            cursor.execute("""
+                SELECT book_id, book_title, borrow_date, return_date, status
+                FROM borrowings 
+                WHERE user_id = ?
+                ORDER BY borrow_date DESC
+            """, (user_id,))
+            borrowings = cursor.fetchall()
+        
+        borrowings_list = []
+        for borrowing in borrowings:
+            borrowings_list.append({
+                "book_id": borrowing[0],
+                "book_title": borrowing[1],
+                "borrow_date": borrowing[2],
+                "return_date": borrowing[3],
+                "status": borrowing[4]
+            })
+        
+        # 상태별 집계
+        status_count = {}
+        for borrowing in borrowings_list:
+            status = borrowing['status']
+            if status not in status_count:
+                status_count[status] = 0
+            status_count[status] += 1
+        
+        return jsonify({
+            "user_id": user_id,
+            "user_name": user_info[0] if user_info else user_id,
+            "member_since": user_info[1] if user_info else None,
+            "total_borrowings": len(borrowings_list),
+            "status_summary": status_count,
+            "borrowings": borrowings_list
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "error": f"사용자 상세 조회 중 오류 발생: {str(e)}",
+            "borrowings": []
+        }), 500
 
 # 📌 로그인 API 
 @app.route('/login', methods=['POST']) 
