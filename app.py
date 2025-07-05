@@ -133,7 +133,7 @@ def login():
     else: 
         return jsonify({"error": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401 
 
-# 📌 [대출 예약 API] - 새로 추가
+# 📌 [대출 예약 API] - 수정: 2개 이상 대출 시 제한
 @app.route('/borrow_book', methods=['POST'])
 def borrow_book():
     data = request.json
@@ -150,9 +150,21 @@ def borrow_book():
     except Exception as e:
         return jsonify({"error": "도서 정보를 가져올 수 없습니다."}), 500
     
-    # 이미 대출 중인지 확인
     with DatabaseConnection() as conn:
         cursor = conn.cursor()
+        
+        # 현재 대출 중인 도서 수 확인
+        cursor.execute("""
+            SELECT COUNT(*) FROM borrowings 
+            WHERE user_id = ? AND status = 'borrowed'
+        """, (user_id,))
+        current_borrowings = cursor.fetchone()[0]
+        
+        # 2개 이상 대출 중인 경우 제한
+        if current_borrowings >= 2:
+            return jsonify({"error": "이미 2개 이상의 도서를 대출 중입니다. 더 이상 예약할 수 없습니다."}), 400
+        
+        # 이미 대출 중인지 확인
         cursor.execute("""
             SELECT id FROM borrowings 
             WHERE user_id = ? AND book_id = ? AND status = 'borrowed'
@@ -172,7 +184,7 @@ def borrow_book():
     
     return jsonify({"message": "대출 예약이 완료되었습니다."}), 200
 
-# 📌 [사용자 대출 현황 조회 API] - 새로 추가
+# 📌 [사용자 대출 현황 조회 API] - 기존 유지
 @app.route('/user_borrowings/<user_id>', methods=['GET'])
 def get_user_borrowings(user_id):
     if not user_id:
@@ -200,7 +212,57 @@ def get_user_borrowings(user_id):
     
     return jsonify({"borrowings": borrowings_list}), 200
 
-# 📌 [대출 예약 취소 API] - 새로 추가
+# 📌 [모든 학생의 대출 현황 조회 API] - 새로 추가
+@app.route('/all_borrowings', methods=['GET'])
+def get_all_borrowings():
+    """모든 학생의 대출 현황을 조회하는 관리자용 API"""
+    with DatabaseConnection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.user_id, u.name, b.book_id, b.book_title, b.borrow_date, b.return_date, b.status
+            FROM borrowings b
+            JOIN users u ON b.user_id = u.username
+            WHERE b.status = 'borrowed'
+            ORDER BY b.borrow_date DESC
+        """)
+        all_borrowings = cursor.fetchall()
+    
+    borrowings_list = []
+    for borrowing in all_borrowings:
+        borrowings_list.append({
+            "user_id": borrowing[0],
+            "user_name": borrowing[1],
+            "book_id": borrowing[2],
+            "book_title": borrowing[3],
+            "borrow_date": borrowing[4],
+            "return_date": borrowing[5],
+            "status": borrowing[6]
+        })
+    
+    # 사용자별 대출 수 집계
+    user_summary = {}
+    for borrowing in borrowings_list:
+        user_id = borrowing['user_id']
+        if user_id not in user_summary:
+            user_summary[user_id] = {
+                "user_name": borrowing['user_name'],
+                "borrow_count": 0,
+                "books": []
+            }
+        user_summary[user_id]["borrow_count"] += 1
+        user_summary[user_id]["books"].append({
+            "book_id": borrowing['book_id'],
+            "book_title": borrowing['book_title'],
+            "borrow_date": borrowing['borrow_date']
+        })
+    
+    return jsonify({
+        "total_borrowings": len(borrowings_list),
+        "all_borrowings": borrowings_list,
+        "user_summary": user_summary
+    }), 200
+
+# 📌 [대출 예약 취소 API] - 기존 유지
 @app.route('/cancel_borrowing', methods=['POST'])
 def cancel_borrowing():
     data = request.json
