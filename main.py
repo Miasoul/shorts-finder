@@ -20,15 +20,15 @@ import concurrent.futures
 import functools 
 import threading 
 from cachetools import TTLCache, cached 
-import openai
+from openai import OpenAI
 import json
 
 app = Flask(__name__) 
 CORS(app) 
 
-# OpenAI API 키 설정 (환경변수로 설정하는 것을 권장)
-OPENAI_API_KEY = "sk-u4uNFqUJ1ct8egb1hRmMHpdGgTap-s1UQkGdFFc-5oT3BlbkFJ_v1oVrXBSSrT2zlWxzKmKn2YZxCuWSxY40cA"
-openai.api_key = OPENAI_API_KEY
+# OpenAI 클라이언트 초기화 (새로운 1.0+ 방식)
+OPENAI_API_KEY = "sk-u4uNFqUJ1ct8egb1hRmMHpdGgTap-s1UQkGdFFc-5oT3BlbkFJ_v1oVrXBSSrT2zlWxzKmKn2IQUvZWYZxCuWSxY40cA"
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # 캐시 설정 - 검색 결과를 저장하는 캐시 (TTL: 1시간) 
 book_cache = TTLCache(maxsize=1000, ttl=3600) 
@@ -99,8 +99,8 @@ def extract_keywords_from_message(user_message):
         return ai_response_cache[cache_key]
     
     try:
-        # 간단한 키워드 추출 프롬프트 (토큰 수 최소화)
-        response = openai.ChatCompletion.create(
+        # 새로운 OpenAI 1.0+ API 방식
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {
@@ -198,7 +198,8 @@ def generate_ai_recommendation(user_message, keywords, books):
 
 위 정보를 바탕으로 친근하게 도서를 추천해주세요. 100자 이내로 답변해주세요."""
 
-        response = openai.ChatCompletion.create(
+        # 새로운 OpenAI 1.0+ API 방식
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {
