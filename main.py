@@ -27,7 +27,7 @@ app = Flask(__name__)
 CORS(app) 
 
 # OpenAI 클라이언트 초기화 (새로운 1.0+ 방식)
-OPENAI_API_KEY = "sk-u4uNFqUJ1ct8egb1hRmMHpdGgTap-s1UQkGdFFc-5oT3BlbkFJ_v1oVrXBSSrT2zYZxCuWSxY40cA"
+OPENAI_API_KEY = "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"
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # 캐시 설정 - 검색 결과를 저장하는 캐시 (TTL: 1시간) 
