@@ -224,7 +224,151 @@ def generate_ai_recommendation(user_message, keywords, books):
     except Exception as e:
         print(f"AI 추천 생성 오류: {e}")
         return f"'{', '.join(keywords)}' 관련 도서를 찾았습니다! 아래 추천 도서들을 확인해보세요. 📚"
+@app.route('/all_borrowings', methods=['GET'])
+def get_all_borrowings():
+    """모든 학생의 대출 현황을 조회하는 관리자용 API"""
+    try:
+        with DatabaseConnection() as conn:
+            cursor = conn.cursor()
+            
+            # 먼저 borrowings 테이블에 데이터가 있는지 확인
+            cursor.execute("SELECT COUNT(*) FROM borrowings")
+            total_records = cursor.fetchone()[0]
+            
+            if total_records == 0:
+                return jsonify({
+                    "total_borrowings": 0,
+                    "all_borrowings": [],
+                    "user_summary": {},
+                    "message": "현재 대출 중인 도서가 없습니다."
+                }), 200
+            
+            # LEFT JOIN으로 변경하여 사용자 정보가 없어도 대출 기록을 가져올 수 있도록 함
+            cursor.execute("""
+                SELECT b.user_id, COALESCE(u.name, b.user_id) as user_name, 
+                       b.book_id, b.book_title, b.borrow_date, b.return_date, b.status
+                FROM borrowings b
+                LEFT JOIN users u ON b.user_id = u.username
+                WHERE b.status = 'borrowed'
+                ORDER BY b.borrow_date DESC
+            """)
+            all_borrowings = cursor.fetchall()
+        
+        borrowings_list = []
+        for borrowing in all_borrowings:
+            borrowings_list.append({
+                "user_id": borrowing[0],
+                "user_name": borrowing[1],
+                "book_id": borrowing[2],
+                "book_title": borrowing[3],
+                "borrow_date": borrowing[4],
+                "return_date": borrowing[5],
+                "status": borrowing[6]
+            })
+        
+        # 사용자별 대출 수 집계
+        user_summary = {}
+        for borrowing in borrowings_list:
+            user_id = borrowing['user_id']
+            if user_id not in user_summary:
+                user_summary[user_id] = {
+                    "user_name": borrowing['user_name'],
+                    "borrow_count": 0,
+                    "books": []
+                }
+            user_summary[user_id]["borrow_count"] += 1
+            user_summary[user_id]["books"].append({
+                "book_id": borrowing['book_id'],
+                "book_title": borrowing['book_title'],
+                "borrow_date": borrowing['borrow_date']
+            })
+        
+        return jsonify({
+            "total_borrowings": len(borrowings_list),
+            "all_borrowings": borrowings_list,
+            "user_summary": user_summary
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            "error": f"대출 현황 조회 중 오류 발생: {str(e)}",
+            "total_borrowings": 0,
+            "all_borrowings": [],
+            "user_summary": {}
+        }), 500
 
+# 📌 [디버깅용 API] - 데이터베이스 상태 확인
+@app.route('/debug/db_status', methods=['GET'])
+def debug_db_status():
+    """데이터베이스 상태를 확인하는 디버깅용 API"""
+    try:
+        with DatabaseConnection() as conn:
+            cursor = conn.cursor()
+            
+            # 테이블 존재 확인
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = cursor.fetchall()
+            
+            # 사용자 수 확인
+            cursor.execute("SELECT COUNT(*) FROM users")
+            user_count = cursor.fetchone()[0]
+            
+            # 전체 대출 기록 수 확인
+            cursor.execute("SELECT COUNT(*) FROM borrowings")
+            total_borrowings = cursor.fetchone()[0]
+            
+            # 현재 대출 중인 기록 수 확인
+            cursor.execute("SELECT COUNT(*) FROM borrowings WHERE status = 'borrowed'")
+            active_borrowings = cursor.fetchone()[0]
+            
+            # 샘플 대출 기록 확인
+            cursor.execute("SELECT * FROM borrowings LIMIT 5")
+            sample_borrowings = cursor.fetchall()
+            
+        return jsonify({
+            "tables": [table[0] for table in tables],
+            "user_count": user_count,
+            "total_borrowings": total_borrowings,
+            "active_borrowings": active_borrowings,
+            "sample_borrowings": sample_borrowings
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            "error": f"데이터베이스 상태 확인 중 오류 발생: {str(e)}"
+        }), 500
+@app.route('/cancel_borrowing', methods=['POST'])
+def cancel_borrowing():
+    data = request.json
+    user_id = data.get("user_id")
+    book_id = data.get("book_id")
+    
+    if not user_id or not book_id:
+        return jsonify({"error": "사용자 ID와 도서 ID가 필요합니다."}), 400
+    
+    with DatabaseConnection() as conn:
+        cursor = conn.cursor()
+        
+        # 대출 기록 확인
+        cursor.execute("""
+            SELECT id FROM borrowings 
+            WHERE user_id = ? AND book_id = ? AND status = 'borrowed'
+        """, (user_id, book_id))
+        borrowing = cursor.fetchone()
+        
+        if not borrowing:
+            return jsonify({"error": "대출 기록을 찾을 수 없습니다."}), 404
+        
+        # 대출 상태를 'cancelled'로 변경
+        cursor.execute("""
+            UPDATE borrowings 
+            SET status = 'cancelled', return_date = ?
+            WHERE user_id = ? AND book_id = ? AND status = 'borrowed'
+        """, (time.strftime('%Y-%m-%d %H:%M:%S'), user_id, book_id))
+        
+        conn.commit()
+    
+    return jsonify({"message": "대출 예약이 취소되었습니다."}), 200
 # 📌 AI 도서 추천 API
 @app.route('/ai_book_recommendation', methods=['POST'])
 def ai_book_recommendation():
